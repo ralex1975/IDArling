@@ -10,6 +10,7 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
+import ida_auto
 import ida_kernwin
 
 from PyQt5.QtGui import QImage, QPixmap  # noqa: I202
@@ -37,6 +38,7 @@ class Client(ClientSocket):
     def __init__(self, plugin, parent=None):
         ClientSocket.__init__(self, plugin.logger, parent)
         self._plugin = plugin
+        self._events = []
 
         # Setup command handlers
         self._handlers = {
@@ -49,27 +51,41 @@ class Client(ClientSocket):
             DownloadFile.Query: self._handle_download_file,
         }
 
+    def call_events(self):
+        while self._events and ida_auto.get_auto_state() == ida_auto.AU_NONE:
+            packet = self._events.pop(0)
+            self._call_event(packet)
+
+    def _call_event(self, packet):
+        self._plugin.core.unhook_all()
+
+        try:
+            packet()
+        except Exception as e:
+            self._logger.warning("Error while calling event")
+            self._logger.exception(e)
+
+        self._plugin.core.hook_all()
+
+        # Check for de-synchronization
+        if self._plugin.core.tick >= packet.tick:
+            self._logger.warning("De-synchronization detected!")
+            packet.tick = self._plugin.core.tick
+        self._plugin.core.tick = packet.tick
+        self._plugin.logger.debug("returning from call_event")
+
     def recv_packet(self, packet):
         if isinstance(packet, Command):
             # Call the corresponding handler
             self._handlers[packet.__class__](packet)
 
         elif isinstance(packet, Event):
-            # Call the event
-            self._plugin.core.unhook_all()
-            try:
-                packet()
-            except Exception as e:
-                self._logger.warning("Error while calling event")
-                self._logger.exception(e)
+            # If we already have some events queued
+            if self._events or ida_auto.get_auto_state() != ida_auto.AU_NONE:
+                self._events.append(packet)
+            else:
+                self._call_event(packet)
 
-            # Check for de-synchronization
-            if self._plugin.core.tick >= packet.tick:
-                self._logger.warning("De-synchronization detected!")
-                packet.tick = self._plugin.core.tick
-            self._plugin.core.tick = packet.tick
-
-            self._plugin.core.hook_all()
         else:
             return False
         return True
@@ -101,11 +117,9 @@ class Client(ClientSocket):
         return ret
 
     def _handle_join_session(self, packet):
-        # Add the user to the navbar
-        self._plugin.interface.painter.paint(
-            packet.name, packet.color, packet.ea
-        )
-        self._plugin.interface.widget.refresh()
+        # Update the users list
+        user = {"color": packet.color, "ea": packet.ea}
+        self._plugin.core.add_user(packet.name, user)
 
         # Show a toast notification
         if packet.silent:
@@ -116,19 +130,18 @@ class Client(ClientSocket):
         self._plugin.interface.show_invite(text, icon)
 
     def _handle_leave_session(self, packet):
+        # Update the users list
+        user = self._plugin.core.remove_user(packet.name)
+        # Refresh the users count
+        self._plugin.interface.widget.refresh()
+
         # Show a toast notification
         if packet.silent:
             return
         text = "%s left the session" % packet.name
         template = QImage(self._plugin.plugin_resource("user.png"))
-        info = self._plugin.interface.painter.users_positions[packet.name]
-        icon = StatusWidget.make_icon(template, info["color"])
+        icon = StatusWidget.make_icon(template, user["color"])
         self._plugin.interface.show_invite(text, icon)
-
-        # Remove the user from the navbar
-        if self._plugin.interface.painter.installed:
-            self._plugin.interface.painter.unpaint(packet.name)
-        self._plugin.interface.widget.refresh()
 
     def _handle_invite_to_location(self, packet):
         # Show a toast notification
@@ -140,26 +153,26 @@ class Client(ClientSocket):
 
         self._plugin.interface.show_invite(text, QPixmap(icon), callback)
 
+    def _handle_update_user_name(self, packet):
+        # Update the users list
+        user = self._plugin.core.remove_user(packet.old_name)
+        self._plugin.core.add_user(packet.new_name, user)
+
+    def _handle_update_user_color(self, packet):
+        # Update the users list
+        user = self._plugin.core.get_user(packet.name)
+        user["color"] = packet.new_color
+        self._plugin.core.add_user(packet.name, user)
+
     def _handle_update_location(self, packet):
-        # Notify the painter
-        self._plugin.interface.painter.paint(
-            packet.name, packet.color, packet.ea
-        )
+        # Update the users list
+        user = self._plugin.core.get_user(packet.name)
+        user["ea"] = packet.ea
+        self._plugin.core.add_user(packet.name, user)
+
         followed = self._plugin.interface.followed
         if followed == packet.name or followed == "everyone":
             ida_kernwin.jumpto(packet.ea)
-
-    def _handle_update_user_name(self, packet):
-        # Notify the painter
-        self._plugin.interface.painter.update_user_name(
-            packet.old_name, packet.new_name
-        )
-
-    def _handle_update_user_color(self, packet):
-        # Notify the painter
-        self._plugin.interface.painter.update_user_color(
-            packet.name, packet.old_color, packet.new_color
-        )
 
     def _handle_download_file(self, query):
         # Upload the current database

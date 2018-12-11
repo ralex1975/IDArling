@@ -336,11 +336,11 @@ class LocalTypesChangedEvent(Event):
                 ti = get_idati()
                 ordinal = ctypes.c_uint32(py_ord)
                 ntf_flags = ctypes.c_int(ida_typeinf.NTF_REPLACE)
-                name = ctypes.c_char_p(name)
-                type = ctypes.c_char_p(type)
-                fields = ctypes.c_char_p(fields)
-                cmt = ctypes.c_char_p(cmt)
-                fieldcmts = ctypes.c_char_p(fieldcmts)
+                name = ctypes.c_char_p(Event.encode_bytes(name))
+                type = ctypes.c_char_p(Event.encode_bytes(type))
+                fields = ctypes.c_char_p(Event.encode_bytes(fields))
+                cmt = ctypes.c_char_p(Event.encode_bytes(cmt))
+                fieldcmts = ctypes.c_char_p(Event.encode_bytes(fieldcmts))
                 sclass = ctypes.c_int(sclass)
                 set_numbered_type(
                     ti,
@@ -353,8 +353,6 @@ class LocalTypesChangedEvent(Event):
                     fieldcmts,
                     sclass,
                 )
-            else:
-                ida_typeinf.del_numbered_type(py_ti, py_ord)
 
         ida_kernwin.request_refresh(ida_kernwin.IWID_LOCTYPS)
 
@@ -802,6 +800,21 @@ class SegmAttrsUpdatedEvent(Event):
         s.perm = self.perm
         s.bitness = self.bitness
         s.update()
+
+
+class SegmMoved(Event):
+    __event__ = "segm_moved_event"
+
+    def __init__(self, from_ea, to_ea, changed_netmap):
+        super(SegmMoved, self).__init__()
+        self.from_ea = from_ea
+        self.to_ea = to_ea
+        self.changed_netmap = changed_netmap
+
+    def __call__(self):
+        flags = ida_segment.MFS_NETMAP if self.changed_netmap else 0
+        s = ida_segment.getseg(self.from_ea)
+        ida_segment.move_segm(s, self.to_ea, flags)
 
 
 class UndefinedEvent(Event):
